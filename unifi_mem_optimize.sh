@@ -15,7 +15,13 @@
 #    - dnsmasq (DNS/DHCP local)
 # =============================================================================
 
-set -euo pipefail
+# set -e REMOVIDO: com -e qualquer comando que falhe mata o script silenciosamente.
+# Usamos -u (variáveis não definidas = erro) e -o pipefail (erros em pipe = erro).
+# Erros não críticos são tratados individualmente com || true.
+set -uo pipefail
+
+# Trap global: loga erros mas NUNCA para o script (exceto die())
+trap 'log "AVISO: erro na linha $LINENO — continuando para a próxima etapa..."' ERR
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIGURAÇÕES AJUSTÁVEIS
@@ -174,46 +180,44 @@ log "[4/10] Retenção de estatísticas, eventos e alertas ajustada para ${RETEN
 # ─────────────────────────────────────────────────────────────────────────────
 log "[5/10] Otimizando parâmetros do kernel (vm.swappiness, vfs_cache_pressure)..."
 
-cat > /etc/sysctl.d/99-unifi-memory.conf << 'EOF'
-# Otimizações de memória para UniFi OS — VERSÃO CONSERVADORA
-# vm.overcommit_memory=1 REMOVIDO: mantém padrão 0 (mais seguro contra OOM kills)
-# vm.overcommit_ratio REMOVIDO
-# zram REMOVIDO: evita latência de compressão em CPU dual-core
-#
-# vm.swappiness=10: só usa swap em emergência (evita thrashing)
-# vm.vfs_cache_pressure=50: equilibra cache de inode vs. pagecache
-# vm.dirty_ratio=5: escreve para disco mais cedo (libera RAM)
-# vm.dirty_background_ratio=2: inicia writeback mais cedo
-# vm.dirty_expire_centisecs=500: dados sujos expiram em 5s
-# vm.dirty_writeback_centisecs=100: writeback a cada 1s
-# vm.zone_reclaim_mode=0: evita reclamação agressiva de zonas
-# vm.min_free_kbytes=65536: mantém 64MB livres para emergências
-vm.swappiness=10
-vm.vfs_cache_pressure=50
-vm.dirty_ratio=5
-vm.dirty_background_ratio=2
-vm.dirty_expire_centisecs=500
-vm.dirty_writeback_centisecs=100
-vm.zone_reclaim_mode=0
-vm.min_free_kbytes=65536
-EOF
+# Parâmetros sysctl — aplicados um a um, pulando os não suportados neste kernel
+SYSCTL_PARAMS=(
+    "vm.swappiness=10"
+    "vm.vfs_cache_pressure=50"
+    "vm.dirty_ratio=5"
+    "vm.dirty_background_ratio=2"
+    "vm.dirty_expire_centisecs=500"
+    "vm.dirty_writeback_centisecs=100"
+    "vm.zone_reclaim_mode=0"
+    "vm.min_free_kbytes=65536"
+)
 
-# Aplicar parâmetro a parâmetro para não matar o script em kernels que não suportam algum deles
-SYSCTL_ERROS=0
-while IFS= read -r line; do
-    # Ignorar linhas em branco e comentários
-    [[ -z "$line" || "$line" == \#* ]] && continue
-    if ! sysctl -w "$line" >> "$LOG" 2>&1; then
-        log "[5/10] AVISO: parâmetro não suportado neste kernel: $line"
-        SYSCTL_ERROS=$((SYSCTL_ERROS + 1))
+SYSCTL_OK=0
+SYSCTL_SKIP=0
+
+for param in "${SYSCTL_PARAMS[@]}"; do
+    if sysctl -w "$param" >> "$LOG" 2>&1; then
+        SYSCTL_OK=$((SYSCTL_OK + 1))
+    else
+        log "[5/10] AVISO: parâmetro ignorado (não suportado): $param"
+        SYSCTL_SKIP=$((SYSCTL_SKIP + 1))
     fi
-done < /etc/sysctl.d/99-unifi-memory.conf
+done
 
-if [[ $SYSCTL_ERROS -gt 0 ]]; then
-    log "[5/10] Kernel parcialmente otimizado ($SYSCTL_ERROS parâmetro(s) não suportado(s) ignorado(s))"
-else
-    log "[5/10] Kernel otimizado para baixo consumo de RAM (modo conservador)"
-fi
+# Gravar arquivo de persistência apenas com os parâmetros aceitos (para reboot)
+{
+    echo "# Otimizações de memória para UniFi OS — VERSÃO CONSERVADORA"
+    echo "# Gerado automaticamente pelo UniFi Memory Optimizer v2.0-safe"
+    for param in "${SYSCTL_PARAMS[@]}"; do
+        key="${param%%=*}"
+        if sysctl -n "$key" >/dev/null 2>&1; then
+            echo "$param"
+        fi
+    done
+} > /etc/sysctl.d/99-unifi-memory.conf 2>/dev/null || \
+    log "[5/10] AVISO: não foi possível gravar /etc/sysctl.d/ — parâmetros aplicados apenas para esta sessão"
+
+log "[5/10] Kernel: ${SYSCTL_OK} parâmetro(s) aplicado(s), ${SYSCTL_SKIP} ignorado(s) (não suportados neste kernel)"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ETAPA 6 — PULADA (zram removido por segurança)
@@ -303,7 +307,6 @@ log "[8/10] Limpeza de disco concluída"
 # ─────────────────────────────────────────────────────────────────────────────
 # ETAPA 9 — DESATIVAR SERVIÇOS NÃO ESSENCIAIS
 # ZERO IMPACTO no link/firewall — apenas serviços de descoberta/impressão
-# SEGURANÇA: ModemManager REMOVIDO (risco para backup WAN 3G/4G USB)
 # ─────────────────────────────────────────────────────────────────────────────
 log "[9/10] Desativando serviços não essenciais..."
 
