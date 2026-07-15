@@ -198,8 +198,22 @@ vm.zone_reclaim_mode=0
 vm.min_free_kbytes=65536
 EOF
 
-sysctl -p /etc/sysctl.d/99-unifi-memory.conf >> "$LOG" 2>&1
-log "[5/10] Kernel otimizado para baixo consumo de RAM (modo conservador)"
+# Aplicar parâmetro a parâmetro para não matar o script em kernels que não suportam algum deles
+SYSCTL_ERROS=0
+while IFS= read -r line; do
+    # Ignorar linhas em branco e comentários
+    [[ -z "$line" || "$line" == \#* ]] && continue
+    if ! sysctl -w "$line" >> "$LOG" 2>&1; then
+        log "[5/10] AVISO: parâmetro não suportado neste kernel: $line"
+        SYSCTL_ERROS=$((SYSCTL_ERROS + 1))
+    fi
+done < /etc/sysctl.d/99-unifi-memory.conf
+
+if [[ $SYSCTL_ERROS -gt 0 ]]; then
+    log "[5/10] Kernel parcialmente otimizado ($SYSCTL_ERROS parâmetro(s) não suportado(s) ignorado(s))"
+else
+    log "[5/10] Kernel otimizado para baixo consumo de RAM (modo conservador)"
+fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ETAPA 6 — PULADA (zram removido por segurança)
